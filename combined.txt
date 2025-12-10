@@ -1,0 +1,967 @@
+// .env
+DATABASE_URL=<database_url>
+FLASK_APP=<flask_app>
+FLASK_ENV=<flask_env>
+SECRET_KEY=<secret_key>
+
+// app/__init__.py
+from flask import Flask
+from flask_cors import CORS
+from flask_migrate import Migrate
+from .models.models import db
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+migrate = Migrate()
+
+def create_app():
+    app = Flask(__name__)
+    
+    # Configuration
+    app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'postgresql://localhost/defi_analytics')
+    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key')
+    
+    # Initialize extensions
+    db.init_app(app)
+    migrate.init_app(app, db)
+    CORS(app)
+    
+    # Register blueprints
+    from .routes import protocols, contracts, users, transactions, market
+    
+    app.register_blueprint(protocols.bp)
+    app.register_blueprint(contracts.bp)
+    app.register_blueprint(users.bp)
+    app.register_blueprint(transactions.bp)
+    app.register_blueprint(market.bp)
+    
+    return app
+
+// app/models/__init__.py
+
+
+// app/models/models.py
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime
+
+db = SQLAlchemy()
+
+class Protocol(db.Model):
+    __tablename__ = 'protocols'
+    
+    protocol_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    protocol_name = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    protocol_symbol = db.Column(db.String(20), nullable=False, index=True)
+    type = db.Column(db.String(50), nullable=False, index=True)  # DEX, Lending, Yield Farming, etc.
+    description = db.Column(db.Text)
+    website_url = db.Column(db.String(500))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    contracts = db.relationship('Contract', backref='protocol', lazy='dynamic', cascade='all, delete-orphan')
+    
+    def to_dict(self):
+        return {
+            'protocol_id': self.protocol_id,
+            'protocol_name': self.protocol_name,
+            'protocol_symbol': self.protocol_symbol,
+            'type': self.type,
+            'description': self.description,
+            'website_url': self.website_url,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+class Contract(db.Model):
+    __tablename__ = 'contracts'
+    __table_args__ = (
+        db.UniqueConstraint('contract_address', 'blockchain', name='uq_contract_blockchain'),
+    )
+    
+    contract_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    contract_address = db.Column(db.String(255), nullable=False, index=True)
+    blockchain = db.Column(db.String(50), nullable=False, index=True)
+    protocol_id = db.Column(db.Integer, db.ForeignKey('protocols.protocol_id'), nullable=False)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    transactions = db.relationship('Transaction', backref='contract', lazy='dynamic', cascade='all, delete-orphan')
+    
+    def to_dict(self):
+        return {
+            'contract_id': self.contract_id,
+            'contract_address': self.contract_address,
+            'blockchain': self.blockchain,
+            'protocol_id': self.protocol_id,
+            'protocol_name': self.protocol.protocol_name if self.protocol else None,
+            'is_active': self.is_active,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+class User(db.Model):
+    __tablename__ = 'users'
+    
+    user_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_address = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    total_transactions = db.Column(db.Integer, default=0)
+    total_volume = db.Column(db.Numeric(38, 18), default=0)
+    first_transaction_date = db.Column(db.DateTime)
+    last_transaction_date = db.Column(db.DateTime)
+    user_type = db.Column(db.String(50))  # whale, regular, small, etc.
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    transactions_sent = db.relationship('Transaction', 
+                                       foreign_keys='Transaction.from_user_id',
+                                       backref='sender', 
+                                       lazy='dynamic')
+    transactions_received = db.relationship('Transaction',
+                                           foreign_keys='Transaction.to_user_id',
+                                           backref='receiver',
+                                           lazy='dynamic')
+    
+    def to_dict(self):
+        return {
+            'user_id': self.user_id,
+            'user_address': self.user_address,
+            'total_transactions': self.total_transactions,
+            'total_volume': str(self.total_volume) if self.total_volume else '0',
+            'first_transaction_date': self.first_transaction_date.isoformat() if self.first_transaction_date else None,
+            'last_transaction_date': self.last_transaction_date.isoformat() if self.last_transaction_date else None,
+            'user_type': self.user_type,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+class Transaction(db.Model):
+    __tablename__ = 'transactions'
+    
+    transaction_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    transaction_hash = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    contract_id = db.Column(db.Integer, db.ForeignKey('contracts.contract_id'), nullable=False)
+    from_user_id = db.Column(db.Integer, db.ForeignKey('users.user_id'))
+    to_user_id = db.Column(db.Integer, db.ForeignKey('users.user_id'))
+    from_address = db.Column(db.String(255), nullable=False, index=True)
+    to_address = db.Column(db.String(255), index=True)
+    value = db.Column(db.Numeric(38, 18))
+    gas_used = db.Column(db.BigInteger)
+    gas_price = db.Column(db.Numeric(38, 18))
+    transaction_fee = db.Column(db.Numeric(38, 18))
+    timestamp = db.Column(db.DateTime, nullable=False, index=True)
+    block_number = db.Column(db.BigInteger, index=True)
+    status = db.Column(db.String(20), default='success')  # success, failed, pending
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    def to_dict(self):
+        return {
+            'transaction_id': self.transaction_id,
+            'transaction_hash': self.transaction_hash,
+            'contract_id': self.contract_id,
+            'from_address': self.from_address,
+            'to_address': self.to_address,
+            'value': str(self.value) if self.value else '0',
+            'gas_used': self.gas_used,
+            'gas_price': str(self.gas_price) if self.gas_price else '0',
+            'transaction_fee': str(self.transaction_fee) if self.transaction_fee else '0',
+            'timestamp': self.timestamp.isoformat() if self.timestamp else None,
+            'block_number': self.block_number,
+            'status': self.status
+        }
+
+class MarketData(db.Model):
+    __tablename__ = 'market_data'
+    
+    market_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    protocol_id = db.Column(db.Integer, db.ForeignKey('protocols.protocol_id'), nullable=False)
+    date = db.Column(db.Date, nullable=False, index=True)
+    total_volume = db.Column(db.Numeric(38, 18))
+    transaction_count = db.Column(db.Integer)
+    unique_users = db.Column(db.Integer)
+    avg_transaction_value = db.Column(db.Numeric(38, 18))
+    total_fees = db.Column(db.Numeric(38, 18))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    protocol = db.relationship('Protocol', backref='market_data')
+    
+    __table_args__ = (
+        db.UniqueConstraint('protocol_id', 'date', name='uq_protocol_date'),
+    )
+    
+    def to_dict(self):
+        return {
+            'market_id': self.market_id,
+            'protocol_id': self.protocol_id,
+            'protocol_name': self.protocol.protocol_name if self.protocol else None,
+            'date': self.date.isoformat() if self.date else None,
+            'total_volume': str(self.total_volume) if self.total_volume else '0',
+            'transaction_count': self.transaction_count,
+            'unique_users': self.unique_users,
+            'avg_transaction_value': str(self.avg_transaction_value) if self.avg_transaction_value else '0',
+            'total_fees': str(self.total_fees) if self.total_fees else '0'
+        }
+
+// app/routes/__init__.py
+
+
+// app/routes/contracts.py
+from flask import Blueprint, request, jsonify
+from ..models.models import db, Contract, Protocol
+
+bp = Blueprint('contracts', __name__, url_prefix='/api/contracts')
+
+# CREATE
+@bp.route('', methods=['POST'])
+def create_contract():
+    data = request.get_json()
+    
+    required_fields = ['contract_address', 'blockchain', 'protocol_id']
+    if not all(field in data for field in required_fields):
+        return jsonify({'error': 'Missing required fields'}), 400
+    
+    # Check if contract already exists
+    existing = Contract.query.filter_by(
+        contract_address=data['contract_address'],
+        blockchain=data['blockchain']
+    ).first()
+    if existing:
+        return jsonify({'error': 'Contract already exists'}), 409
+    
+    contract = Contract(
+        contract_address=data['contract_address'],
+        blockchain=data['blockchain'],
+        protocol_id=data['protocol_id'],
+        is_active=data.get('is_active', True)
+    )
+    
+    db.session.add(contract)
+    db.session.commit()
+    
+    return jsonify({'message': 'Contract created', 'contract': contract.to_dict()}), 201
+
+# READ - Get all contracts
+@bp.route('', methods=['GET'])
+def get_contracts():
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 20, type=int)
+    blockchain = request.args.get('blockchain')
+    protocol_id = request.args.get('protocol_id', type=int)
+    
+    query = Contract.query
+    
+    if blockchain:
+        query = query.filter_by(blockchain=blockchain)
+    if protocol_id:
+        query = query.filter_by(protocol_id=protocol_id)
+    
+    paginated = query.paginate(page=page, per_page=per_page, error_out=False)
+    
+    return jsonify({
+        'contracts': [c.to_dict() for c in paginated.items],
+        'total': paginated.total,
+        'pages': paginated.pages,
+        'current_page': page
+    })
+
+# READ - Get single contract
+@bp.route('/<int:contract_id>', methods=['GET'])
+def get_contract(contract_id):
+    contract = Contract.query.get_or_404(contract_id)
+    return jsonify(contract.to_dict())
+
+# UPDATE
+@bp.route('/<int:contract_id>', methods=['PUT'])
+def update_contract(contract_id):
+    contract = Contract.query.get_or_404(contract_id)
+    data = request.get_json()
+    
+    if 'is_active' in data:
+        contract.is_active = data['is_active']
+    if 'contract_address' in data:
+        contract.contract_address = data['contract_address']
+    if 'blockchain' in data:
+        contract.blockchain = data['blockchain']
+    
+    db.session.commit()
+    
+    return jsonify({'message': 'Contract updated', 'contract': contract.to_dict()})
+
+# DELETE
+@bp.route('/<int:contract_id>', methods=['DELETE'])
+def delete_contract(contract_id):
+    contract = Contract.query.get_or_404(contract_id)
+    db.session.delete(contract)
+    db.session.commit()
+    
+    return jsonify({'message': 'Contract deleted'}), 200
+
+# ANALYTICS - Contracts by blockchain
+@bp.route('/by-blockchain', methods=['GET'])
+def contracts_by_blockchain():
+    from sqlalchemy import func
+    
+    results = db.session.query(
+        Contract.blockchain,
+        func.count(Contract.contract_id).label('count')
+    ).group_by(Contract.blockchain).all()
+    
+    return jsonify({
+        'blockchains': [{'blockchain': r[0], 'count': r[1]} for r in results]
+    })
+
+// app/routes/market.py
+from flask import Blueprint, request, jsonify
+from ..models.models import db, MarketData, Protocol
+from sqlalchemy import func, desc
+from datetime import datetime, timedelta
+
+bp = Blueprint('market', __name__, url_prefix='/api/market')
+
+# CREATE
+@bp.route('', methods=['POST'])
+def create_market_data():
+    data = request.get_json()
+    
+    required_fields = ['protocol_id', 'date']
+    if not all(field in data for field in required_fields):
+        return jsonify({'error': 'Missing required fields'}), 400
+    
+    market_data = MarketData(
+        protocol_id=data['protocol_id'],
+        date=datetime.fromisoformat(data['date']).date(),
+        total_volume=data.get('total_volume'),
+        transaction_count=data.get('transaction_count'),
+        unique_users=data.get('unique_users'),
+        avg_transaction_value=data.get('avg_transaction_value'),
+        total_fees=data.get('total_fees')
+    )
+    
+    db.session.add(market_data)
+    db.session.commit()
+    
+    return jsonify({'message': 'Market data created', 'market_data': market_data.to_dict()}), 201
+
+# READ - Get all market data
+@bp.route('', methods=['GET'])
+def get_market_data():
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 20, type=int)
+    protocol_id = request.args.get('protocol_id', type=int)
+    
+    query = MarketData.query
+    
+    if protocol_id:
+        query = query.filter_by(protocol_id=protocol_id)
+    
+    paginated = query.order_by(desc(MarketData.date)).paginate(
+        page=page, per_page=per_page, error_out=False
+    )
+    
+    return jsonify({
+        'market_data': [m.to_dict() for m in paginated.items],
+        'total': paginated.total,
+        'pages': paginated.pages,
+        'current_page': page
+    })
+
+# READ - Get single market data entry
+@bp.route('/<int:market_id>', methods=['GET'])
+def get_market_data_entry(market_id):
+    market_data = MarketData.query.get_or_404(market_id)
+    return jsonify(market_data.to_dict())
+
+# UPDATE
+@bp.route('/<int:market_id>', methods=['PUT'])
+def update_market_data(market_id):
+    market_data = MarketData.query.get_or_404(market_id)
+    data = request.get_json()
+    
+    if 'total_volume' in data:
+        market_data.total_volume = data['total_volume']
+    if 'transaction_count' in data:
+        market_data.transaction_count = data['transaction_count']
+    if 'unique_users' in data:
+        market_data.unique_users = data['unique_users']
+    if 'avg_transaction_value' in data:
+        market_data.avg_transaction_value = data['avg_transaction_value']
+    if 'total_fees' in data:
+        market_data.total_fees = data['total_fees']
+    
+    db.session.commit()
+    
+    return jsonify({'message': 'Market data updated', 'market_data': market_data.to_dict()})
+
+# DELETE
+@bp.route('/<int:market_id>', methods=['DELETE'])
+def delete_market_data(market_id):
+    market_data = MarketData.query.get_or_404(market_id)
+    db.session.delete(market_data)
+    db.session.commit()
+    
+    return jsonify({'message': 'Market data deleted'}), 200
+
+# ANALYTICS - Market trends
+@bp.route('/trends', methods=['GET'])
+def get_market_trends():
+    days = request.args.get('days', 30, type=int)
+    protocol_id = request.args.get('protocol_id', type=int)
+    
+    query = MarketData.query
+    
+    if protocol_id:
+        query = query.filter_by(protocol_id=protocol_id)
+    
+    start_date = datetime.utcnow().date() - timedelta(days=days)
+    results = query.filter(MarketData.date >= start_date)\
+                   .order_by(MarketData.date).all()
+    
+    return jsonify({
+        'trends': [m.to_dict() for m in results]
+    })
+
+# ANALYTICS - Protocol comparison
+@bp.route('/compare', methods=['GET'])
+def compare_protocols():
+    days = request.args.get('days', 7, type=int)
+    start_date = datetime.utcnow().date() - timedelta(days=days)
+    
+    results = db.session.query(
+        Protocol.protocol_name,
+        Protocol.type,
+        func.sum(MarketData.total_volume).label('total_volume'),
+        func.sum(MarketData.transaction_count).label('transaction_count'),
+        func.avg(MarketData.unique_users).label('avg_unique_users')
+    ).join(MarketData, Protocol.protocol_id == MarketData.protocol_id)\
+     .filter(MarketData.date >= start_date)\
+     .group_by(Protocol.protocol_id, Protocol.protocol_name, Protocol.type)\
+     .order_by(desc(func.sum(MarketData.total_volume))).all()
+    
+    return jsonify({
+        'comparison': [{
+            'protocol_name': r[0],
+            'type': r[1],
+            'total_volume': str(r[2]) if r[2] else '0',
+            'transaction_count': r[3] or 0,
+            'avg_unique_users': float(r[4]) if r[4] else 0
+        } for r in results]
+    })
+
+// app/routes/protocols.py
+from flask import Blueprint, request, jsonify
+from ..models.models import db, Protocol
+from sqlalchemy import func
+
+bp = Blueprint('protocols', __name__, url_prefix='/api/protocols')
+
+# CREATE
+@bp.route('', methods=['POST'])
+def create_protocol():
+    data = request.get_json()
+    
+    # Validation
+    required_fields = ['protocol_name', 'protocol_symbol', 'type']
+    if not all(field in data for field in required_fields):
+        return jsonify({'error': 'Missing required fields'}), 400
+    
+    # Check if protocol already exists
+    existing = Protocol.query.filter_by(protocol_name=data['protocol_name']).first()
+    if existing:
+        return jsonify({'error': 'Protocol already exists'}), 409
+    
+    protocol = Protocol(
+        protocol_name=data['protocol_name'],
+        protocol_symbol=data['protocol_symbol'],
+        type=data['type'],
+        description=data.get('description'),
+        website_url=data.get('website_url')
+    )
+    
+    db.session.add(protocol)
+    db.session.commit()
+    
+    return jsonify({'message': 'Protocol created', 'protocol': protocol.to_dict()}), 201
+
+# READ - Get all protocols
+@bp.route('', methods=['GET'])
+def get_protocols():
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 20, type=int)
+    protocol_type = request.args.get('type')
+    
+    query = Protocol.query
+    
+    if protocol_type:
+        query = query.filter_by(type=protocol_type)
+    
+    paginated = query.paginate(page=page, per_page=per_page, error_out=False)
+    
+    return jsonify({
+        'protocols': [p.to_dict() for p in paginated.items],
+        'total': paginated.total,
+        'pages': paginated.pages,
+        'current_page': page
+    })
+
+# READ - Get single protocol
+@bp.route('/<int:protocol_id>', methods=['GET'])
+def get_protocol(protocol_id):
+    protocol = Protocol.query.get_or_404(protocol_id)
+    return jsonify(protocol.to_dict())
+
+# UPDATE
+@bp.route('/<int:protocol_id>', methods=['PUT'])
+def update_protocol(protocol_id):
+    protocol = Protocol.query.get_or_404(protocol_id)
+    data = request.get_json()
+    
+    # Update fields
+    if 'protocol_name' in data:
+        protocol.protocol_name = data['protocol_name']
+    if 'protocol_symbol' in data:
+        protocol.protocol_symbol = data['protocol_symbol']
+    if 'type' in data:
+        protocol.type = data['type']
+    if 'description' in data:
+        protocol.description = data['description']
+    if 'website_url' in data:
+        protocol.website_url = data['website_url']
+    
+    db.session.commit()
+    
+    return jsonify({'message': 'Protocol updated', 'protocol': protocol.to_dict()})
+
+# DELETE
+@bp.route('/<int:protocol_id>', methods=['DELETE'])
+def delete_protocol(protocol_id):
+    protocol = Protocol.query.get_or_404(protocol_id)
+    db.session.delete(protocol)
+    db.session.commit()
+    
+    return jsonify({'message': 'Protocol deleted'}), 200
+
+# ANALYTICS - Protocol statistics
+@bp.route('/stats', methods=['GET'])
+def get_protocol_stats():
+    stats = db.session.query(
+        Protocol.type,
+        func.count(Protocol.protocol_id).label('count')
+    ).group_by(Protocol.type).all()
+    
+    return jsonify({
+        'protocol_types': [{'type': s[0], 'count': s[1]} for s in stats]
+    })
+
+# ANALYTICS - Top protocols by transaction volume
+@bp.route('/top-by-volume', methods=['GET'])
+def get_top_protocols():
+    limit = request.args.get('limit', 10, type=int)
+    
+    from ..models.models import Contract, Transaction
+    
+    results = db.session.query(
+        Protocol.protocol_name,
+        Protocol.type,
+        func.sum(Transaction.value).label('total_volume'),
+        func.count(Transaction.transaction_id).label('transaction_count')
+    ).join(Contract, Protocol.protocol_id == Contract.protocol_id)\
+     .join(Transaction, Contract.contract_id == Transaction.contract_id)\
+     .group_by(Protocol.protocol_id, Protocol.protocol_name, Protocol.type)\
+     .order_by(func.sum(Transaction.value).desc())\
+     .limit(limit).all()
+    
+    return jsonify({
+        'top_protocols': [{
+            'protocol_name': r[0],
+            'type': r[1],
+            'total_volume': str(r[2]) if r[2] else '0',
+            'transaction_count': r[3]
+        } for r in results]
+    })
+
+// app/routes/transactions.py
+from flask import Blueprint, request, jsonify
+from ..models.models import db, Transaction
+from sqlalchemy import func, desc
+from datetime import datetime, timedelta
+
+bp = Blueprint('transactions', __name__, url_prefix='/api/transactions')
+
+# CREATE
+@bp.route('', methods=['POST'])
+def create_transaction():
+    data = request.get_json()
+    
+    required_fields = ['transaction_hash', 'contract_id', 'from_address', 'timestamp']
+    if not all(field in data for field in required_fields):
+        return jsonify({'error': 'Missing required fields'}), 400
+    
+    existing = Transaction.query.filter_by(transaction_hash=data['transaction_hash']).first()
+    if existing:
+        return jsonify({'error': 'Transaction already exists'}), 409
+    
+    transaction = Transaction(
+        transaction_hash=data['transaction_hash'],
+        contract_id=data['contract_id'],
+        from_user_id=data.get('from_user_id'),
+        to_user_id=data.get('to_user_id'),
+        from_address=data['from_address'],
+        to_address=data.get('to_address'),
+        value=data.get('value'),
+        gas_used=data.get('gas_used'),
+        gas_price=data.get('gas_price'),
+        transaction_fee=data.get('transaction_fee'),
+        timestamp=datetime.fromisoformat(data['timestamp']),
+        block_number=data.get('block_number'),
+        status=data.get('status', 'success')
+    )
+    
+    db.session.add(transaction)
+    db.session.commit()
+    
+    return jsonify({'message': 'Transaction created', 'transaction': transaction.to_dict()}), 201
+
+# READ - Get all transactions
+@bp.route('', methods=['GET'])
+def get_transactions():
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 20, type=int)
+    contract_id = request.args.get('contract_id', type=int)
+    from_address = request.args.get('from_address')
+    status = request.args.get('status')
+    
+    query = Transaction.query
+    
+    if contract_id:
+        query = query.filter_by(contract_id=contract_id)
+    if from_address:
+        query = query.filter_by(from_address=from_address)
+    if status:
+        query = query.filter_by(status=status)
+    
+    paginated = query.order_by(desc(Transaction.timestamp)).paginate(
+        page=page, per_page=per_page, error_out=False
+    )
+    
+    return jsonify({
+        'transactions': [t.to_dict() for t in paginated.items],
+        'total': paginated.total,
+        'pages': paginated.pages,
+        'current_page': page
+    })
+
+# READ - Get single transaction
+@bp.route('/<int:transaction_id>', methods=['GET'])
+def get_transaction(transaction_id):
+    transaction = Transaction.query.get_or_404(transaction_id)
+    return jsonify(transaction.to_dict())
+
+# READ - Get transaction by hash
+@bp.route('/hash/<string:tx_hash>', methods=['GET'])
+def get_transaction_by_hash(tx_hash):
+    transaction = Transaction.query.filter_by(transaction_hash=tx_hash).first_or_404()
+    return jsonify(transaction.to_dict())
+
+# UPDATE
+@bp.route('/<int:transaction_id>', methods=['PUT'])
+def update_transaction(transaction_id):
+    transaction = Transaction.query.get_or_404(transaction_id)
+    data = request.get_json()
+    
+    if 'status' in data:
+        transaction.status = data['status']
+    
+    db.session.commit()
+    
+    return jsonify({'message': 'Transaction updated', 'transaction': transaction.to_dict()})
+
+# DELETE
+@bp.route('/<int:transaction_id>', methods=['DELETE'])
+def delete_transaction(transaction_id):
+    transaction = Transaction.query.get_or_404(transaction_id)
+    db.session.delete(transaction)
+    db.session.commit()
+    
+    return jsonify({'message': 'Transaction deleted'}), 200
+
+# ANALYTICS - Transaction volume over time
+@bp.route('/volume-over-time', methods=['GET'])
+def get_volume_over_time():
+    days = request.args.get('days', 30, type=int)
+    start_date = datetime.utcnow() - timedelta(days=days)
+    
+    results = db.session.query(
+        func.date(Transaction.timestamp).label('date'),
+        func.sum(Transaction.value).label('total_volume'),
+        func.count(Transaction.transaction_id).label('transaction_count')
+    ).filter(Transaction.timestamp >= start_date)\
+     .group_by(func.date(Transaction.timestamp))\
+     .order_by(func.date(Transaction.timestamp)).all()
+    
+    return jsonify({
+        'data': [{
+            'date': r[0].isoformat() if r[0] else None,
+            'total_volume': str(r[1]) if r[1] else '0',
+            'transaction_count': r[2]
+        } for r in results]
+    })
+
+# ANALYTICS - Transaction statistics
+@bp.route('/stats', methods=['GET'])
+def get_transaction_stats():
+    total_transactions = Transaction.query.count()
+    total_volume = db.session.query(func.sum(Transaction.value)).scalar() or 0
+    avg_transaction_value = db.session.query(func.avg(Transaction.value)).scalar() or 0
+    total_fees = db.session.query(func.sum(Transaction.transaction_fee)).scalar() or 0
+    
+    return jsonify({
+        'total_transactions': total_transactions,
+        'total_volume': str(total_volume),
+        'avg_transaction_value': str(avg_transaction_value),
+        'total_fees': str(total_fees)
+    })
+
+// app/routes/users.py
+from flask import Blueprint, request, jsonify
+from ..models.models import db, User
+from sqlalchemy import func
+
+bp = Blueprint('users', __name__, url_prefix='/api/users')
+
+# CREATE
+@bp.route('', methods=['POST'])
+def create_user():
+    data = request.get_json()
+    
+    if 'user_address' not in data:
+        return jsonify({'error': 'user_address is required'}), 400
+    
+    existing = User.query.filter_by(user_address=data['user_address']).first()
+    if existing:
+        return jsonify({'error': 'User already exists'}), 409
+    
+    user = User(
+        user_address=data['user_address'],
+        user_type=data.get('user_type')
+    )
+    
+    db.session.add(user)
+    db.session.commit()
+    
+    return jsonify({'message': 'User created', 'user': user.to_dict()}), 201
+
+# READ - Get all users
+@bp.route('', methods=['GET'])
+def get_users():
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 20, type=int)
+    user_type = request.args.get('user_type')
+    
+    query = User.query
+    
+    if user_type:
+        query = query.filter_by(user_type=user_type)
+    
+    paginated = query.order_by(User.total_volume.desc()).paginate(
+        page=page, per_page=per_page, error_out=False
+    )
+    
+    return jsonify({
+        'users': [u.to_dict() for u in paginated.items],
+        'total': paginated.total,
+        'pages': paginated.pages,
+        'current_page': page
+    })
+
+# READ - Get single user
+@bp.route('/<int:user_id>', methods=['GET'])
+def get_user(user_id):
+    user = User.query.get_or_404(user_id)
+    return jsonify(user.to_dict())
+
+# READ - Get user by address
+@bp.route('/address/<string:address>', methods=['GET'])
+def get_user_by_address(address):
+    user = User.query.filter_by(user_address=address).first_or_404()
+    return jsonify(user.to_dict())
+
+# UPDATE
+@bp.route('/<int:user_id>', methods=['PUT'])
+def update_user(user_id):
+    user = User.query.get_or_404(user_id)
+    data = request.get_json()
+    
+    if 'user_type' in data:
+        user.user_type = data['user_type']
+    if 'total_transactions' in data:
+        user.total_transactions = data['total_transactions']
+    if 'total_volume' in data:
+        user.total_volume = data['total_volume']
+    
+    db.session.commit()
+    
+    return jsonify({'message': 'User updated', 'user': user.to_dict()})
+
+# DELETE
+@bp.route('/<int:user_id>', methods=['DELETE'])
+def delete_user(user_id):
+    user = User.query.get_or_404(user_id)
+    db.session.delete(user)
+    db.session.commit()
+    
+    return jsonify({'message': 'User deleted'}), 200
+
+# ANALYTICS - Top users by volume
+@bp.route('/top-by-volume', methods=['GET'])
+def get_top_users():
+    limit = request.args.get('limit', 10, type=int)
+    
+    users = User.query.order_by(User.total_volume.desc()).limit(limit).all()
+    
+    return jsonify({
+        'top_users': [u.to_dict() for u in users]
+    })
+
+# ANALYTICS - User statistics
+@bp.route('/stats', methods=['GET'])
+def get_user_stats():
+    total_users = User.query.count()
+    active_users = User.query.filter(User.total_transactions > 0).count()
+    
+    stats = {
+        'total_users': total_users,
+        'active_users': active_users,
+        'inactive_users': total_users - active_users
+    }
+    
+    return jsonify(stats)
+
+// app/utils/__init__.py
+
+
+// app/utils/data_loader.py
+import pandas as pd
+from app.models.models import db, Protocol, Contract, User, Transaction, MarketData
+from sqlalchemy.exc import IntegrityError
+from datetime import datetime
+
+# Example for contracts.parquet
+def load_contracts_from_parquet(parquet_path):
+    df = pd.read_parquet(parquet_path)
+    protocols_added = {}
+    contracts_added = 0
+    for _, row in df.iterrows():
+        protocol_name = row['protocol_name']
+        if protocol_name not in protocols_added:
+            protocol = Protocol.query.filter_by(protocol_name=protocol_name).first()
+            if not protocol:
+                protocol = Protocol(
+                    protocol_name=row['protocol_name'],
+                    protocol_symbol=row['protocol_symbol'],
+                    type=row['type'],
+                    description=row['description'],
+                    website_url=row['website_url']
+                )
+                db.session.add(protocol)
+                db.session.flush()
+            protocols_added[protocol_name] = protocol.protocol_id
+        existing_contract = Contract.query.filter_by(
+            contract_address=row['contract_address'],
+            blockchain=row['blockchain']
+        ).first()
+        if not existing_contract:
+            contract = Contract(
+                contract_address=row['contract_address'],
+                blockchain=row['blockchain'],
+                protocol_id=protocols_added[protocol_name]
+            )
+            db.session.add(contract)
+            contracts_added += 1
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+    return {'protocols_added': len(protocols_added), 'contracts_added': contracts_added}
+
+
+// requirements.txt
+Flask==3.0.0
+Flask-SQLAlchemy==3.1.1
+Flask-Migrate==4.0.5
+psycopg2-binary==2.9.9
+python-dotenv==1.0.0
+pandas==2.1.3
+pyarrow==14.0.1
+Flask-CORS==4.0.0
+
+// run.py
+from app import create_app, db
+from app.models.models import Protocol, Contract, User, Transaction, MarketData
+import os
+from app.utils.data_loader import load_contracts_from_parquet
+
+
+app = create_app()
+
+@app.cli.command()
+def init_db():
+    """Initialize the database"""
+    db.drop_all()
+    db.create_all()
+    print("Database initialized!")
+
+@app.cli.command()
+def load_data():
+    """Load initial data from Parquet files"""
+    parquet_path = 'data/contracts.parquet'  # Parquet file path
+    if os.path.exists(parquet_path):
+        result = load_contracts_from_parquet(parquet_path)
+        print(f"Data loaded: {result}")
+    else:
+        print(f"File not found: {parquet_path}")
+
+
+@app.cli.command()
+def seed_sample_data():
+    """Seed sample data for testing"""
+    # This would create sample transactions, users, and market data
+    print("Sample data seeded!")
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
+
+// test_api.sh
+#!/bin/bash
+
+BASE_URL="http://127.0.0.1:5000/api"
+
+echo "1. Testing CREATE Protocol"
+curl -X POST $BASE_URL/protocols \
+  -H "Content-Type: application/json" \
+  -d '{"protocol_name": "Test Protocol", "protocol_symbol": "TEST", "type": "DEX", "description": "Test description"}'
+
+echo "\n\n2. Testing GET All Protocols"
+curl -X GET $BASE_URL/protocols
+
+echo "\n\n3. Testing GET Single Protocol"
+curl -X GET $BASE_URL/protocols/1
+
+echo "\n\n4. Testing UPDATE Protocol"
+curl -X PUT $BASE_URL/protocols/1 \
+  -H "Content-Type: application/json" \
+  -d '{"description": "Updated description"}'
+
+echo "\n\n5. Testing Protocol Stats"
+curl -X GET $BASE_URL/protocols/stats
+
+echo "\n\n6. Testing Transaction Volume Over Time"
+curl -X GET "$BASE_URL/transactions/volume-over-time?days=30"
+
+echo "\n\n7. Testing Market Trends"
+curl -X GET "$BASE_URL/market/trends?days=7"
+
+echo "\n\n8. Testing DELETE Protocol"
+curl -X DELETE $BASE_URL/protocols/1
+
+
